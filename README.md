@@ -72,11 +72,12 @@ left or right, and swaps the currently-focused container with the container in t
 Note that this behavior is exactly the same as the move command if both top-level containers
 involved in the swap are windows. When the top-level containers are proper containers, swapping them
 requires the i3wm "swap" command. This subcommand addresses the ergonomics issues of the swap
-command not having a direction. Note also that the swap subcommand does not cross display
+command not having a direction, and the usually non-desirable property that the sizes of the
+containers are swapped as well. Note also that the swap subcommand does not cross display
 boundaries, i.e. it does not support swapping two containers that are on different displays.
 
 ## TODO
 
-- [ ] Make swap preserve widths by default, and add a flag to not preserve width.
+- [x] Make swap preserve widths by default, and add a flag to not preserve width.
 - [ ] Add a rotate subcommand which rotates all toplevel containers to the left or right.
 - [ ] Make swap be able to swap the leftmost container with the rightmost container.

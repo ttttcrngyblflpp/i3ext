@@ -18,22 +18,21 @@ impl NodeExt for Node {
     }
 }
 
-trait CommandExt {
+trait IntoResult {
     fn into_result(self) -> Result<(), anyhow::Error>;
 }
 
-impl CommandExt for Command {
+impl IntoResult for Command {
     fn into_result(self) -> Result<(), anyhow::Error> {
         let Command { outcomes } = self;
-        outcomes.into_iter().map(CommandOutcomeExt::into_result).collect::<Result<_, _>>()
+        outcomes
+            .into_iter()
+            .map(IntoResult::into_result)
+            .collect::<Result<_, _>>()
     }
 }
 
-trait CommandOutcomeExt {
-    fn into_result(self) -> Result<(), anyhow::Error>;
-}
-
-impl CommandOutcomeExt for CommandOutcome {
+impl IntoResult for CommandOutcome {
     fn into_result(self) -> Result<(), anyhow::Error> {
         let Self { success, error } = self;
         if success {
@@ -117,11 +116,15 @@ struct Resize {
 #[derive(FromArgs, Debug)]
 #[argh(subcommand, name = "swap")]
 struct Swap {
+    /// direction to swap in (either left or right)
+    #[argh(positional)]
+    direction: Direction,
     /// dry-run (don't actually run any commands)
     #[argh(switch, short = 'd')]
     dry_run: bool,
-    #[argh(positional)]
-    direction: Direction,
+    /// don't resize both src and dst to maintain their original size
+    #[argh(switch, short = 'r')]
+    noresize: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -142,11 +145,25 @@ impl std::str::FromStr for Direction {
     }
 }
 
-fn resize(args: Resize) -> Result<(), anyhow::Error> {
-    let Resize {
+impl std::fmt::Display for Direction {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::Left => "left",
+                Self::Right => "right",
+            }
+        )
+    }
+}
+
+fn resize(
+    Resize {
         dry_run,
         mut percentages,
-    } = args;
+    }: Resize,
+) -> Result<(), anyhow::Error> {
     let sum = percentages.iter().fold(0, |sum, i| sum + i);
     if sum > 100 {
         return Err(anyhow!(
@@ -194,7 +211,8 @@ fn resize(args: Resize) -> Result<(), anyhow::Error> {
             );
             info!("running cmd: {}", cmd);
             if !dry_run {
-                let () = conn.run_command(&cmd)
+                let () = conn
+                    .run_command(&cmd)
                     .map_err(anyhow::Error::from)
                     .and_then(|reply| reply.into_result())
                     .context(format!("failed to run command: cmd={}", cmd))?;
@@ -205,18 +223,34 @@ fn resize(args: Resize) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-fn swap(args: Swap) -> Result<(), anyhow::Error> {
-    let Swap { dry_run, direction } = args;
+fn swap(
+    Swap {
+        direction,
+        dry_run,
+        noresize,
+    }: Swap,
+) -> Result<(), anyhow::Error> {
     let mut conn = i3ipc::I3Connection::connect()?;
     let root = conn.get_tree()?;
     let root_container =
         find_root_container(&root).ok_or_else(|| anyhow!("failed to find root container"))?;
     log_tree("", root_container);
 
-    let (src_index, src) = root_container
+    let (
+        src_index,
+        &Node {
+            id: src_id,
+            percent: src_percent,
+            ..
+        },
+    ) = root_container
         .get_focused_child()
         .ok_or_else(|| anyhow!("failed to find focused toplevel container"))?;
-    let dst = match direction {
+    let &Node {
+        id: dst_id,
+        percent: dst_percent,
+        ..
+    } = match direction {
         Direction::Left => {
             if src_index == 0 {
                 return Err(anyhow!("no container to the left of leftmost container"));
@@ -231,10 +265,39 @@ fn swap(args: Swap) -> Result<(), anyhow::Error> {
         }
     };
 
-    let cmd = format!("[con_id=\"{}\"] swap container with con_id {}", src.id, dst.id);
+    if !noresize {
+        let dst_percent =
+            dst_percent.ok_or_else(|| anyhow!("failed to find dst container percent"))?;
+        let src_percent =
+            src_percent.ok_or_else(|| anyhow!("failed to find src container percent"))?;
+        let delta = ((dst_percent - src_percent) * 100.0) as i64;
+        let (verb, ppt) = if delta < 0 {
+            ("shrink", -delta)
+        } else {
+            ("grow", delta)
+        };
+        let cmd = format!(
+            "[con_id=\"{}\"] resize {} {} 1 px or {} ppt",
+            src_id, verb, direction, ppt
+        );
+        info!("running cmd: {}", cmd);
+        if !dry_run {
+            let () = conn
+                .run_command(&cmd)
+                .map_err(anyhow::Error::from)
+                .and_then(|reply| reply.into_result())
+                .context(format!("failed to run command: cmd={}", cmd))?;
+        }
+    }
+
+    let cmd = format!(
+        "[con_id=\"{}\"] swap container with con_id {}",
+        src_id, dst_id
+    );
     info!("running cmd: {}", cmd);
     if !dry_run {
-        let () = conn.run_command(&cmd)
+        let () = conn
+            .run_command(&cmd)
             .map_err(anyhow::Error::from)
             .and_then(|reply| reply.into_result())
             .context(format!("failed to run command: cmd={}", cmd))?;
