@@ -183,12 +183,18 @@ fn resize(
         ));
     }
     let n = root_container.nodes.len();
-    if n == 3 && percentages.len() == 1 {
-        percentages.push(if percentages[0] * 2 < 100 {
-            100 - percentages[0] * 2
-        } else {
-            (100 - percentages[0]) / 2
-        });
+    match percentages.len() {
+        0 => {
+            percentages.resize(n-1, 100/n as u64);
+        }
+        1 => if n == 3 {
+            percentages.push(if percentages[0] * 2 < 100 {
+                100 - percentages[0] * 2
+            } else {
+                (100 - percentages[0]) / 2
+            });
+        }
+        _ => {}
     }
     if n != percentages.len() + 1 {
         return Err(anyhow!(
