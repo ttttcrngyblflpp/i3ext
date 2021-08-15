@@ -165,13 +165,11 @@ fn resize(
     }: Resize,
 ) -> Result<(), anyhow::Error> {
     let sum = percentages.iter().fold(0, |sum, i| sum + i);
-    if sum > 100 {
+    if sum >= 100 {
         return Err(anyhow!(
-            "percentages cannot sum to over 100: {:?}",
+            "percentages must sum to less than 100: {:?}",
             percentages
         ));
-    } else if sum == 100 {
-        percentages.pop();
     }
 
     let mut conn = i3ipc::I3Connection::connect()?;
@@ -185,6 +183,13 @@ fn resize(
         ));
     }
     let n = root_container.nodes.len();
+    if n == 3 && percentages.len() == 1 {
+        percentages.push(if percentages[0] * 2 < 100 {
+            100 - percentages[0] * 2
+        } else {
+            (100 - percentages[0]) / 2
+        });
+    }
     if n != percentages.len() + 1 {
         return Err(anyhow!(
             "#percentages+1 != #containers; percentages={:?}, #containers={}",
