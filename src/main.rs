@@ -1,6 +1,8 @@
+#[deny(unused_results)]
 use anyhow::{anyhow, Context as _};
 use argh::FromArgs;
 use i3ipc::reply::{Command, CommandOutcome, Node, NodeLayout, NodeType};
+use i3ipc::I3Connection;
 use log::{debug, info};
 
 trait NodeExt {
@@ -16,6 +18,15 @@ impl NodeExt for Node {
                 .find(|(_, node)| node.id == id)
         })
     }
+}
+
+fn run_command(conn: &mut I3Connection, cmd: &str) -> Result<(), anyhow::Error> {
+    info!("running cmd: {}", cmd);
+    conn.run_command(cmd)
+        .map_err(anyhow::Error::from)
+        .and_then(|reply| reply.into_result())
+        .context(format!("failed to run command: cmd={}", cmd))?;
+    Ok(())
 }
 
 trait IntoResult {
@@ -47,12 +58,15 @@ impl IntoResult for CommandOutcome {
     }
 }
 
-fn find_root_container(mut node: &Node) -> Option<&Node> {
+fn find_root_container(mut node: &Node) -> anyhow::Result<&Node> {
     loop {
         if node.nodetype == NodeType::Workspace {
             break;
         } else {
-            node = node.get_focused_child()?.1;
+            node = node
+                .get_focused_child()
+                .ok_or_else(|| anyhow!("node {:?} has no focused child", node))?
+                .1;
         }
     }
     loop {
@@ -60,10 +74,10 @@ fn find_root_container(mut node: &Node) -> Option<&Node> {
             if let Some((_, child)) = node.get_focused_child() {
                 node = child;
             } else {
-                return Some(node);
+                return Ok(node);
             }
         } else {
-            return Some(node);
+            return Ok(node);
         }
     }
 }
@@ -90,6 +104,9 @@ fn log_tree(indent: &str, node: &Node) {
 #[derive(FromArgs)]
 /// i3wm helper extensions
 struct Args {
+    /// log level (defaults to WARN)
+    #[argh(option, short = 'l', default = "log::LevelFilter::Warn")]
+    log_level: log::LevelFilter,
     #[argh(subcommand)]
     subcommands: SubCommands,
 }
@@ -99,15 +116,29 @@ struct Args {
 enum SubCommands {
     Resize(Resize),
     Swap(Swap),
+    Rotate(Rotate),
+    Push(Push),
+    Split(Split),
 }
+
+/// Rotate subcommand.
+#[derive(FromArgs, Debug)]
+#[argh(subcommand, name = "rotate")]
+struct Rotate {
+    /// direction to rotate in (either left or right)
+    #[argh(positional)]
+    direction: Direction,
+}
+
+/// Split subcommand.
+#[derive(FromArgs, Debug)]
+#[argh(subcommand, name = "split")]
+struct Split {}
 
 /// Resize subcommand.
 #[derive(FromArgs, Debug)]
 #[argh(subcommand, name = "resize")]
 struct Resize {
-    /// dry-run (don't actually run any commands)
-    #[argh(switch, short = 'd')]
-    dry_run: bool,
     #[argh(positional)]
     percentages: Vec<u64>,
 }
@@ -119,15 +150,21 @@ struct Swap {
     /// direction to swap in (either left or right)
     #[argh(positional)]
     direction: Direction,
-    /// dry-run (don't actually run any commands)
-    #[argh(switch, short = 'd')]
-    dry_run: bool,
     /// don't resize both src and dst to maintain their original size
     #[argh(switch, short = 'r')]
     noresize: bool,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+/// Push subcommand.
+#[derive(FromArgs, Debug)]
+#[argh(subcommand, name = "push")]
+struct Push {
+    /// direction to push into (either left or right)
+    #[argh(positional)]
+    direction: Direction,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Direction {
     Left,
     Right,
@@ -158,11 +195,106 @@ impl std::fmt::Display for Direction {
     }
 }
 
+fn is_merged(n: &Node) -> Option<(&Node, &Node)> {
+    (n.layout == NodeLayout::Stacked
+        && n.nodes
+            .iter()
+            .all(|Node { layout, .. }| *layout == NodeLayout::Stacked)
+        && n.nodes.len() == 2)
+        .then(|| (&n.nodes[0], &n.nodes[1]))
+}
+
+fn split(conn: &mut I3Connection) -> anyhow::Result<()> {
+    let root = conn.get_tree()?;
+    let root = find_root_container(&root)?;
+    log_tree("", &root);
+    let first = root
+        .nodes
+        .iter()
+        .next()
+        .ok_or_else(|| anyhow!("no toplevel container"))?;
+    let last = root
+        .nodes
+        .iter()
+        .last()
+        .ok_or_else(|| anyhow!("no toplevel container"))?;
+
+    // This takes care of the special case of 2 toplevel containers.
+    let (middle, side, dir) = if let Some((top, bottom)) = is_merged(root) {
+        (top, bottom, Direction::Right)
+    } else if let Some((top, bottom)) = is_merged(first) {
+        (bottom, top, Direction::Left)
+    } else if let Some((top, bottom)) = is_merged(last) {
+        (top, bottom, Direction::Right)
+    } else {
+        return Err(anyhow!("no candidate found"));
+    };
+    run_command(conn, &format!("[con_id=\"{}\"] move {}", middle.id, dir))?;
+    run_command(
+        conn,
+        &format!("[con_id=\"{}\"] move {1}, move {1}", side.id, dir),
+    )?;
+    resize(
+        conn,
+        Resize {
+            percentages: vec![],
+        },
+    )?;
+    run_command(conn, "restart")?;
+    Ok(())
+}
+
+fn push(conn: &mut I3Connection, Push { direction }: Push) -> Result<(), anyhow::Error> {
+    let root = conn.get_tree()?;
+    let root = find_root_container(&root)?;
+    for toplevel in root.nodes.iter() {
+        if toplevel.layout != NodeLayout::Stacked {
+            run_command(
+                conn,
+                &format!(
+                    "[con_id=\"{}\"] split vertical, layout stacking",
+                    toplevel.id
+                ),
+            )?;
+        }
+    }
+
+    let root = conn.get_tree()?;
+    let (left, right) = focused_and(&root, direction)?;
+    if is_merged(left).is_some() || is_merged(right).is_some() {
+        return Err(anyhow!("src or dst already merged, not proceeding"));
+    }
+    run_command(
+        conn,
+        &format!("[con_id=\"{}\"] split vertical, layout stacking", left.id),
+    )?;
+    let last_id = left
+        .nodes
+        .iter()
+        .last()
+        .ok_or_else(|| anyhow!("right container is empty"))?
+        .id;
+    run_command(conn, &format!("[con_id=\"{}\"] mark _push", last_id))?;
+    run_command(
+        conn,
+        &format!(
+            "[con_id=\"{}\"] move container to mark _push, move down",
+            right.id
+        ),
+    )?;
+    resize(
+        conn,
+        Resize {
+            percentages: vec![33],
+        },
+    )?;
+
+    Ok(())
+}
+
 fn resize(
-    Resize {
-        dry_run,
-        mut percentages,
-    }: Resize,
+    conn: &mut I3Connection,
+    Resize { mut percentages }: Resize,
 ) -> Result<(), anyhow::Error> {
     let sum = percentages.iter().fold(0, |sum, i| sum + i);
     if sum >= 100 {
@@ -172,10 +304,8 @@ fn resize(
         ));
     }
 
-    let mut conn = i3ipc::I3Connection::connect()?;
     let root = conn.get_tree()?;
-    let root_container =
-        find_root_container(&root).ok_or_else(|| anyhow!("failed to find root container"))?;
+    let root_container = find_root_container(&root)?;
     log_tree("", root_container);
     if root_container.layout != NodeLayout::SplitH {
         return Err(anyhow!(
@@ -185,14 +315,16 @@ fn resize(
     let n = root_container.nodes.len();
     match percentages.len() {
         0 => {
-            percentages.resize(n-1, 100/n as u64);
+            percentages.resize(n - 1, 100 / n as u64);
         }
-        1 => if n == 3 {
-            percentages.push(if percentages[0] * 2 < 100 {
-                100 - percentages[0] * 2
-            } else {
-                (100 - percentages[0]) / 2
-            });
+        1 => {
+            if n == 3 {
+                percentages.push(if percentages[0] * 2 < 100 {
+                    100 - percentages[0] * 2
+                } else {
+                    (100 - percentages[0]) / 2
+                });
+            }
         }
         _ => {}
     }
@@ -220,110 +352,122 @@ fn resize(
                 "[con_id=\"{}\"] resize {} right 1 px or {} ppt",
                 con.id, verb, ppt
             );
-            info!("running cmd: {}", cmd);
-            if !dry_run {
-                let () = conn
-                    .run_command(&cmd)
-                    .map_err(anyhow::Error::from)
-                    .and_then(|reply| reply.into_result())
-                    .context(format!("failed to run command: cmd={}", cmd))?;
-            }
+            run_command(conn, &cmd)?
         }
         delta = -delta;
     }
     Ok(())
 }
 
-fn swap(
-    Swap {
-        direction,
-        dry_run,
-        noresize,
-    }: Swap,
-) -> Result<(), anyhow::Error> {
-    let mut conn = i3ipc::I3Connection::connect()?;
-    let root = conn.get_tree()?;
-    let root_container =
-        find_root_container(&root).ok_or_else(|| anyhow!("failed to find root container"))?;
+fn focused_and(root: &Node, direction: Direction) -> anyhow::Result<(&Node, &Node)> {
+    let root_container = find_root_container(&root)?;
     log_tree("", root_container);
 
-    let (
-        src_index,
-        &Node {
-            id: src_id,
-            percent: src_percent,
-            ..
-        },
-    ) = root_container
+    let (src_index, src) = root_container
         .get_focused_child()
         .ok_or_else(|| anyhow!("failed to find focused toplevel container"))?;
-    let &Node {
-        id: dst_id,
-        percent: dst_percent,
-        ..
-    } = match direction {
+    Ok(match direction {
         Direction::Left => {
             if src_index == 0 {
                 return Err(anyhow!("no container to the left of leftmost container"));
             }
-            &root_container.nodes[src_index - 1]
+            (&root_container.nodes[src_index - 1], src)
         }
         Direction::Right => {
             if src_index + 1 >= root_container.nodes.len() {
                 return Err(anyhow!("no container to the right of rightmost container"));
             }
-            &root_container.nodes[src_index + 1]
+            (src, &root_container.nodes[src_index + 1])
         }
-    };
+    })
+}
 
+fn swap(
+    conn: &mut I3Connection,
+    left: &Node,
+    right: &Node,
+    noresize: bool,
+) -> Result<(), anyhow::Error> {
     if !noresize {
-        let dst_percent =
-            dst_percent.ok_or_else(|| anyhow!("failed to find dst container percent"))?;
-        let src_percent =
-            src_percent.ok_or_else(|| anyhow!("failed to find src container percent"))?;
-        let delta = ((dst_percent - src_percent) * 100.0) as i64;
+        let right_percent = right
+            .percent
+            .ok_or_else(|| anyhow!("failed to find right container percent"))?;
+        let left_percent = left
+            .percent
+            .ok_or_else(|| anyhow!("failed to find left container percent"))?;
+        let delta = ((right_percent - left_percent) * 100.0) as i64;
         let (verb, ppt) = if delta < 0 {
             ("shrink", -delta)
         } else {
             ("grow", delta)
         };
         let cmd = format!(
-            "[con_id=\"{}\"] resize {} {} 1 px or {} ppt",
-            src_id, verb, direction, ppt
+            "[con_id=\"{}\"] resize {} right 1 px or {} ppt",
+            left.id, verb, ppt
         );
-        info!("running cmd: {}", cmd);
-        if !dry_run {
-            let () = conn
-                .run_command(&cmd)
-                .map_err(anyhow::Error::from)
-                .and_then(|reply| reply.into_result())
-                .context(format!("failed to run command: cmd={}", cmd))?;
-        }
+        run_command(conn, &cmd)?;
     }
 
     let cmd = format!(
         "[con_id=\"{}\"] swap container with con_id {}",
-        src_id, dst_id
+        left.id, right.id
     );
-    info!("running cmd: {}", cmd);
-    if !dry_run {
-        let () = conn
-            .run_command(&cmd)
-            .map_err(anyhow::Error::from)
-            .and_then(|reply| reply.into_result())
-            .context(format!("failed to run command: cmd={}", cmd))?;
+    run_command(conn, &cmd)?;
+    Ok(())
+}
+
+fn rotate(conn: &mut I3Connection, Rotate { direction }: Rotate) -> anyhow::Result<()> {
+    let root = conn.get_tree()?;
+    let root = find_root_container(&root)?;
+    match direction {
+        Direction::Left => {
+            let mut iter = root.nodes.iter();
+            let first = match iter.next() {
+                Some(node) => node,
+                None => return Ok(()),
+            };
+            for node in iter {
+                swap(conn, first, node, false)?;
+            }
+        }
+        Direction::Right => {
+            let mut iter = root.nodes.iter().rev();
+            let last = match iter.next() {
+                Some(node) => node,
+                None => return Ok(()),
+            };
+            for node in iter {
+                swap(conn, node, last, false)?;
+            }
+        }
     }
     Ok(())
 }
 
 fn main() -> Result<(), anyhow::Error> {
+    let Args {
+        log_level,
+        subcommands,
+    } = argh::from_env();
     let () = simple_logger::SimpleLogger::new()
+        .with_level(log_level)
         .init()
         .context("failed to initialize simple logger")?;
-    let Args { subcommands } = argh::from_env();
+    let mut conn = I3Connection::connect()?;
     let () = match subcommands {
-        SubCommands::Resize(args) => resize(args)?,
-        SubCommands::Swap(args) => swap(args)?,
+        SubCommands::Resize(args) => resize(&mut conn, args)?,
+        SubCommands::Swap(Swap {
+            direction,
+            noresize,
+        }) => {
+            let root = conn.get_tree()?;
+
+            let (left, right) = focused_and(&root, direction)?;
+            swap(&mut conn, left, right, noresize)?;
+        }
+        SubCommands::Push(args) => push(&mut conn, args)?,
+        SubCommands::Split(Split {}) => split(&mut conn)?,
+        SubCommands::Rotate(args) => rotate(&mut conn, args)?,
     };
     Ok(())
 }
