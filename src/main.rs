@@ -85,6 +85,7 @@ fn find_root_container(mut node: &Node) -> anyhow::Result<&Node> {
 fn log_tree(indent: &str, node: &Node) {
     let Node {
         name,
+        rect,
         percent,
         nodetype,
         focused,
@@ -92,8 +93,8 @@ fn log_tree(indent: &str, node: &Node) {
         ..
     } = node;
     debug!(
-        "{}name={:?}, percent={:?}, nodetype={:?}, focused={}, layout={:?}",
-        indent, name, percent, nodetype, focused, layout
+        "{}name={:?}, percent={:?}, rect={:?}, nodetype={:?}, focused={}, layout={:?}",
+        indent, name, percent, rect, nodetype, focused, layout
     );
     let indent = indent.to_owned() + "  ";
     for node in node.nodes.iter() {
@@ -114,12 +115,18 @@ struct Args {
 #[derive(FromArgs, Debug)]
 #[argh(subcommand)]
 enum SubCommands {
+    LogTree(LogTree),
     Resize(Resize),
     Swap(Swap),
     Rotate(Rotate),
     Push(Push),
     Split(Split),
 }
+
+/// LogTree subcommand.
+#[derive(FromArgs, Debug)]
+#[argh(subcommand, name = "log_tree")]
+struct LogTree {}
 
 /// Rotate subcommand.
 #[derive(FromArgs, Debug)]
@@ -455,6 +462,11 @@ fn main() -> Result<(), anyhow::Error> {
         .context("failed to initialize simple logger")?;
     let mut conn = I3Connection::connect()?;
     let () = match subcommands {
+        SubCommands::LogTree(LogTree {}) => {
+            let root = conn.get_tree()?;
+            let root = find_root_container(&root)?;
+            log_tree("", &root);
+        }
         SubCommands::Resize(args) => resize(&mut conn, args)?,
         SubCommands::Swap(Swap {
             direction,
