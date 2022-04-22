@@ -396,23 +396,21 @@ fn swap(
     noresize: bool,
 ) -> Result<(), anyhow::Error> {
     if !noresize {
-        let right_percent = right
-            .percent
-            .ok_or_else(|| anyhow!("failed to find right container percent"))?;
-        let left_percent = left
-            .percent
-            .ok_or_else(|| anyhow!("failed to find left container percent"))?;
-        let delta = ((right_percent - left_percent) * 100.0) as i64;
-        let (verb, ppt) = if delta < 0 {
-            ("shrink", -delta)
-        } else {
-            ("grow", delta)
-        };
-        let cmd = format!(
-            "[con_id=\"{}\"] resize {} right 1 px or {} ppt",
-            left.id, verb, ppt
-        );
-        run_command(conn, &cmd)?;
+        let right_width = right.rect.2;
+        let left_width = left.rect.2;
+        let delta = right_width - left_width;
+        if delta != 0 {
+            let (verb, delta) = if delta < 0 {
+                ("shrink", -delta)
+            } else {
+                ("grow", delta)
+            };
+            let cmd = format!(
+                "[con_id=\"{}\"] resize {} right {} px",
+                left.id, verb, delta
+            );
+            run_command(conn, &cmd)?;
+        }
     }
 
     let cmd = format!(
