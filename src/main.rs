@@ -188,16 +188,10 @@ impl std::fmt::Display for Direction {
 
 fn resize(
     conn: &mut I3Connection,
-    Resize { mut percentages }: Resize,
+    Resize {
+        percentages: mut dst,
+    }: Resize,
 ) -> Result<(), anyhow::Error> {
-    let sum = percentages.iter().fold(0, |sum, i| sum + i);
-    if sum >= 100 {
-        return Err(anyhow!(
-            "percentages must sum to less than 100: {:?}",
-            percentages
-        ));
-    }
-
     let root = conn.get_tree()?;
     let root_container = find_root_container(&root)?;
     log_tree("", root_container);
@@ -207,48 +201,68 @@ fn resize(
         ));
     }
     let n = root_container.nodes.len();
-    match percentages.len() {
-        0 => {
-            percentages.resize(n - 1, 100 / n as u64);
+    if dst.len() == 0 {
+        let width = 100 / n as u64;
+        dst = itertools::unfold(0, |acc| {
+            *acc += width;
+            (*acc < 100).then(|| *acc)
+        })
+        .collect::<Vec<_>>();
+    } else if dst.len() == n - 1 {
+        for i in 1..dst.len() {
+            dst[i] += dst[i - 1];
         }
-        1 => {
-            if n == 3 {
-                percentages.push(if percentages[0] * 2 < 100 {
-                    100 - percentages[0] * 2
-                } else {
-                    (100 - percentages[0]) / 2
-                });
+        if *dst.last().unwrap() >= 100 {
+            return Err(anyhow!("percentages must sum to less than 100: {:?}", dst));
+        }
+    } else {
+        return Err(anyhow!("wrong number of percentages passed: {:?}", dst));
+    }
+
+    let mut acc = 0;
+    let mut src = root_container
+        .nodes
+        .iter()
+        .take(n - 1)
+        .map(|con| {
+            acc += (con.percent.expect("missing percentage value in container") * 100.0).round()
+                as u64;
+            acc
+        })
+        .collect::<Vec<_>>();
+
+    loop {
+        let mut count = 0;
+        for i in 0..=n - 2 {
+            if src[i] == dst[i] {
+                count += 1;
+            } else if (i == n - 2 && src[i] < dst[i])
+                || (i < n - 2 && src[i] < dst[i] && dst[i] < src[i + 1])
+            {
+                let cmd = format!(
+                    "[con_id=\"{}\"] resize grow right 1 px or {} ppt",
+                    root_container.nodes[i].id,
+                    dst[i] - src[i],
+                );
+                run_command(conn, &cmd).context(format!("resizing index {}", i))?;
+                src[i] = dst[i];
+                count += 1;
+            } else if (i == 0 && dst[i] < src[i])
+                || (i > 0 && src[i - 1] < dst[i] && dst[i] < src[i])
+            {
+                let cmd = format!(
+                    "[con_id=\"{}\"] resize shrink right 1 px or {} ppt",
+                    root_container.nodes[i].id,
+                    src[i] - dst[i],
+                );
+                run_command(conn, &cmd).context(format!("resizing index {}", i))?;
+                src[i] = dst[i];
+                count += 1;
             }
         }
-        _ => {}
-    }
-    if n != percentages.len() + 1 {
-        return Err(anyhow!(
-            "#percentages+1 != #containers; percentages={:?}, #containers={}",
-            percentages,
-            n
-        ));
-    }
-    let mut delta = 0i64;
-    for (con, want) in root_container.nodes[..n - 1].iter().zip(percentages) {
-        let percent = con
-            .percent
-            .ok_or_else(|| anyhow!("missing percentage value in container"))?;
-        let percent = (percent * 100.0).round() as u64;
-        delta = want as i64 - (percent as i64 + delta);
-        let (verb, ppt) = if delta < 0 {
-            ("shrink", -delta)
-        } else {
-            ("grow", delta)
-        };
-        if ppt > 0 {
-            let cmd = format!(
-                "[con_id=\"{}\"] resize {} right 1 px or {} ppt",
-                con.id, verb, ppt
-            );
-            run_command(conn, &cmd)?
+        if count == n - 1 {
+            break;
         }
-        delta = -delta;
     }
     Ok(())
 }
