@@ -119,7 +119,6 @@ enum SubCommands {
     Resize(Resize),
     Swap(Swap),
     Rotate(Rotate),
-    Push(Push),
     Split(Split),
 }
 
@@ -160,15 +159,6 @@ struct Swap {
     /// don't resize both src and dst to maintain their original size
     #[argh(switch, short = 'r')]
     noresize: bool,
-}
-
-/// Push subcommand.
-#[derive(FromArgs, Debug)]
-#[argh(subcommand, name = "push")]
-struct Push {
-    /// direction to push into (either left or right)
-    #[argh(positional)]
-    direction: Direction,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -248,54 +238,6 @@ fn split(conn: &mut I3Connection) -> anyhow::Result<()> {
         },
     )?;
     run_command(conn, "restart")?;
-    Ok(())
-}
-
-fn push(conn: &mut I3Connection, Push { direction }: Push) -> Result<(), anyhow::Error> {
-    let root = conn.get_tree()?;
-    let root = find_root_container(&root)?;
-    for toplevel in root.nodes.iter() {
-        if toplevel.layout != NodeLayout::Stacked {
-            run_command(
-                conn,
-                &format!(
-                    "[con_id=\"{}\"] split vertical, layout stacking",
-                    toplevel.id
-                ),
-            )?;
-        }
-    }
-
-    let root = conn.get_tree()?;
-    let (left, right) = focused_and(&root, direction)?;
-    if is_merged(left).is_some() || is_merged(right).is_some() {
-        return Err(anyhow!("src or dst already merged, not proceeding"));
-    }
-    run_command(
-        conn,
-        &format!("[con_id=\"{}\"] split vertical, layout stacking", left.id),
-    )?;
-    let last_id = left
-        .nodes
-        .iter()
-        .last()
-        .ok_or_else(|| anyhow!("right container is empty"))?
-        .id;
-    run_command(conn, &format!("[con_id=\"{}\"] mark _push", last_id))?;
-    run_command(
-        conn,
-        &format!(
-            "[con_id=\"{}\"] move container to mark _push, move down",
-            right.id
-        ),
-    )?;
-    resize(
-        conn,
-        Resize {
-            percentages: vec![33],
-        },
-    )?;
-
     Ok(())
 }
 
@@ -475,7 +417,6 @@ fn main() -> Result<(), anyhow::Error> {
             let (left, right) = focused_and(&root, direction)?;
             swap(&mut conn, left, right, noresize)?;
         }
-        SubCommands::Push(args) => push(&mut conn, args)?,
         SubCommands::Split(Split {}) => split(&mut conn)?,
         SubCommands::Rotate(args) => rotate(&mut conn, args)?,
     };
