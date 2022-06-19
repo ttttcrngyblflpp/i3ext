@@ -7,6 +7,8 @@ use log::{debug, info};
 
 trait NodeExt {
     fn get_focused_child(&self) -> Option<(usize, &Self)>;
+    fn percentages_cumulative(&self) -> Vec<u64>;
+    fn percentages(&self) -> Vec<u64>;
 }
 
 impl NodeExt for Node {
@@ -17,6 +19,26 @@ impl NodeExt for Node {
                 .enumerate()
                 .find(|(_, node)| node.id == id)
         })
+    }
+
+    fn percentages_cumulative(&self) -> Vec<u64> {
+        let mut acc = 0;
+        self.nodes
+            .iter()
+            .take(self.nodes.len() - 1)
+            .map(|con| {
+                acc += (con.percent.expect("missing percentage value in container") * 100.0).round()
+                    as u64;
+                acc
+            })
+            .collect::<Vec<_>>()
+    }
+
+    fn percentages(&self) -> Vec<u64> {
+        self.nodes
+            .iter()
+            .map(|con| (con.percent.expect("missing percentage") * 100.0).round() as u64)
+            .collect::<Vec<_>>()
     }
 }
 
@@ -119,6 +141,7 @@ enum SubCommands {
     Resize(Resize),
     Swap(Swap),
     Rotate(Rotate),
+    Center(Center),
 }
 
 /// LogTree subcommand.
@@ -155,6 +178,14 @@ struct Swap {
     noresize: bool,
 }
 
+/// Center subcommand.
+///
+/// Does nothing if the focused column is an outer column, or if there is not
+/// enough space to steal from the outer columns to perform the operation.
+#[derive(FromArgs, Debug)]
+#[argh(subcommand, name = "center")]
+struct Center {}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Direction {
     Left,
@@ -186,12 +217,7 @@ impl std::fmt::Display for Direction {
     }
 }
 
-fn resize(
-    conn: &mut I3Connection,
-    Resize {
-        percentages: mut dst,
-    }: Resize,
-) -> Result<(), anyhow::Error> {
+fn resize(conn: &mut I3Connection, mut dst: Vec<u64>) -> Result<(), anyhow::Error> {
     let root = conn.get_tree()?;
     let root_container = find_root_container(&root)?;
     log_tree("", root_container);
@@ -219,17 +245,7 @@ fn resize(
         return Err(anyhow!("wrong number of percentages passed: {:?}", dst));
     }
 
-    let mut acc = 0;
-    let mut src = root_container
-        .nodes
-        .iter()
-        .take(n - 1)
-        .map(|con| {
-            acc += (con.percent.expect("missing percentage value in container") * 100.0).round()
-                as u64;
-            acc
-        })
-        .collect::<Vec<_>>();
+    let mut src = root_container.percentages_cumulative();
 
     loop {
         let mut count = 0;
@@ -265,6 +281,51 @@ fn resize(
         }
     }
     Ok(())
+}
+
+fn center(conn: &mut I3Connection) -> Result<(), anyhow::Error> {
+    let root = conn.get_tree()?;
+    let root = find_root_container(&root)?;
+    let (i, _) = root
+        .get_focused_child()
+        .ok_or_else(|| anyhow!("no top-level container apparently"))?;
+    if i == 0 {
+        anyhow::bail!("leftmost top-level container selected");
+    }
+    if i == root.nodes.len() - 1 {
+        anyhow::bail!("rightmost top-level container selected");
+    }
+    // Figure out if we need to move left or right.
+    let percentages_cumulative = root.percentages_cumulative();
+    let mut percentages = root.percentages();
+    let con_center = (percentages_cumulative[i] + percentages_cumulative[i - 1]) / 2;
+    if con_center == 50 {
+        return Ok(());
+    } else if con_center > 50 {
+        let from_center = con_center - 50;
+        if percentages[0] < from_center {
+            anyhow::bail!(
+                "cannot steal {} from leftmost container with width {}",
+                from_center,
+                percentages[0]
+            );
+        }
+        percentages[0] -= from_center;
+    } else {
+        let from_center = 50 - con_center;
+        if *percentages.last().unwrap() < from_center {
+            anyhow::bail!(
+                "cannot steal {} from rightmost container with width {}",
+                from_center,
+                percentages.last().unwrap()
+            );
+        }
+        percentages[0] += from_center;
+    }
+    let _ = percentages.pop();
+
+    // Perform the resize.
+    resize(conn, percentages)
 }
 
 fn focused_and(root: &Node, direction: Direction) -> anyhow::Result<(&Node, &Node)> {
@@ -366,7 +427,7 @@ fn main() -> Result<(), anyhow::Error> {
             let root = find_root_container(&root)?;
             log_tree("", &root);
         }
-        SubCommands::Resize(args) => resize(&mut conn, args)?,
+        SubCommands::Resize(Resize { percentages }) => resize(&mut conn, percentages)?,
         SubCommands::Swap(Swap {
             direction,
             noresize,
@@ -377,6 +438,7 @@ fn main() -> Result<(), anyhow::Error> {
             swap(&mut conn, left, right, noresize)?;
         }
         SubCommands::Rotate(args) => rotate(&mut conn, args)?,
+        SubCommands::Center(Center {}) => center(&mut conn)?,
     };
     Ok(())
 }
