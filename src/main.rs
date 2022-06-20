@@ -303,24 +303,19 @@ fn center(conn: &mut I3Connection) -> Result<(), anyhow::Error> {
         return Ok(());
     } else if con_center > 50 {
         let from_center = con_center - 50;
-        if percentages[0] < from_center {
-            anyhow::bail!(
-                "cannot steal {} from leftmost container with width {}",
-                from_center,
-                percentages[0]
-            );
-        }
-        percentages[0] -= from_center;
+        percentages[0] = if percentages[0] < from_center {
+            1
+        } else {
+            percentages[0] - from_center
+        };
     } else {
         let from_center = 50 - con_center;
-        if *percentages.last().unwrap() < from_center {
-            anyhow::bail!(
-                "cannot steal {} from rightmost container with width {}",
-                from_center,
-                percentages.last().unwrap()
-            );
-        }
-        percentages[0] += from_center;
+        let last = *percentages.last().unwrap();
+        percentages[0] += if last < from_center {
+            last - 1
+        } else {
+            from_center
+        };
     }
     let _ = percentages.pop();
 
