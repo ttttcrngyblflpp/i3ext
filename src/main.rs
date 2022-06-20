@@ -184,7 +184,11 @@ struct Swap {
 /// enough space to steal from the outer columns to perform the operation.
 #[derive(FromArgs, Debug)]
 #[argh(subcommand, name = "center")]
-struct Center {}
+struct Center {
+    /// direction to center in (either left or right)
+    #[argh(positional)]
+    direction: Option<Direction>,
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Direction {
@@ -283,22 +287,38 @@ fn resize(conn: &mut I3Connection, mut dst: Vec<u64>) -> Result<(), anyhow::Erro
     Ok(())
 }
 
-fn center(conn: &mut I3Connection) -> Result<(), anyhow::Error> {
+fn center(conn: &mut I3Connection, dir: Option<Direction>) -> Result<(), anyhow::Error> {
     let root = conn.get_tree()?;
     let root = find_root_container(&root)?;
     let (i, _) = root
         .get_focused_child()
         .ok_or_else(|| anyhow!("no top-level container apparently"))?;
-    if i == 0 {
-        anyhow::bail!("leftmost top-level container selected");
-    }
-    if i == root.nodes.len() - 1 {
-        anyhow::bail!("rightmost top-level container selected");
-    }
     // Figure out if we need to move left or right.
     let percentages_cumulative = root.percentages_cumulative();
     let mut percentages = root.percentages();
-    let con_center = (percentages_cumulative[i] + percentages_cumulative[i - 1]) / 2;
+    let con_center = match dir {
+        None => {
+            if i == 0 {
+                anyhow::bail!("cannot center leftmost top-level container");
+            }
+            if i == root.nodes.len() - 1 {
+                anyhow::bail!("cannot center rightmost top-level container");
+            }
+            (percentages_cumulative[i] + percentages_cumulative[i - 1]) / 2
+        }
+        Some(Direction::Left) => {
+            if i == 0 {
+                anyhow::bail!("cannot center left side of leftmost top-level container");
+            }
+            percentages_cumulative[i - 1]
+        }
+        Some(Direction::Right) => {
+            if i == root.nodes.len() - 1 {
+                anyhow::bail!("cannot center right side of rightmost top-level container");
+            }
+            percentages_cumulative[i]
+        }
+    };
     if con_center == 50 {
         return Ok(());
     } else if con_center > 50 {
@@ -433,7 +453,7 @@ fn main() -> Result<(), anyhow::Error> {
             swap(&mut conn, left, right, noresize)?;
         }
         SubCommands::Rotate(args) => rotate(&mut conn, args)?,
-        SubCommands::Center(Center {}) => center(&mut conn)?,
+        SubCommands::Center(Center { direction }) => center(&mut conn, direction)?,
     };
     Ok(())
 }
