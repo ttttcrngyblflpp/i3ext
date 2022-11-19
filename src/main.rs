@@ -251,6 +251,12 @@ fn resize(conn: &mut I3Connection, mut dst: Vec<u64>) -> Result<(), anyhow::Erro
 
     let mut src = root_container.percentages_cumulative();
 
+    // Proof of why it's always possible to align at least one edge per iteration
+    // of the loop: the only way container[0]'s right edge cannot be aligned is
+    // if it extends past container[1]'s current right edge. The only way container[1]'s
+    // right edge cannot be aligned is if it extends past container[2]'s currenty right
+    // edge. This cannot repeat indefinitely, at maximum the rightmost container
+    // can be shrunk so that its left edge is in the correct place.
     loop {
         let mut count = 0;
         for i in 0..=n - 2 {
@@ -323,21 +329,23 @@ fn center(conn: &mut I3Connection, dir: Option<Direction>) -> Result<(), anyhow:
         return Ok(());
     } else if con_center > 50 {
         let from_center = con_center - 50;
-        percentages[0] = if percentages[0] < from_center {
-            1
-        } else {
+        percentages[0] = if percentages[0] > from_center {
             percentages[0] - from_center
+        } else {
+            1
         };
     } else {
         let from_center = 50 - con_center;
         let last = *percentages.last().unwrap();
-        percentages[0] += if last < from_center {
-            last - 1
-        } else {
+        percentages[0] += if last > from_center {
             from_center
+        } else {
+            last - 1
         };
     }
     let _ = percentages.pop();
+
+    debug!("performing resize: {:?}", percentages);
 
     // Perform the resize.
     resize(conn, percentages)
