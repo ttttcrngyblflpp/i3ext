@@ -1,5 +1,5 @@
 #[deny(unused_results)]
-use anyhow::{anyhow, Context as _};
+use anyhow::{anyhow, bail, Context as _};
 use argh::FromArgs;
 use i3ipc::reply::{Command, CommandOutcome, Node, NodeLayout, NodeType};
 use i3ipc::I3Connection;
@@ -9,6 +9,8 @@ trait NodeExt {
     fn get_focused_child(&self) -> Option<(usize, &Self)>;
     fn percentages_cumulative(&self) -> Vec<u64>;
     fn percentages(&self) -> Vec<u64>;
+    fn widths(&self) -> Vec<i32>;
+    fn right_x(&self) -> Vec<i32>;
 }
 
 impl NodeExt for Node {
@@ -38,6 +40,22 @@ impl NodeExt for Node {
         self.nodes
             .iter()
             .map(|con| (con.percent.expect("missing percentage") * 100.0).round() as u64)
+            .collect::<Vec<_>>()
+    }
+
+    fn widths(&self) -> Vec<i32> {
+        self.nodes.iter().map(|con| con.rect.2).collect::<Vec<_>>()
+    }
+
+    fn right_x(&self) -> Vec<i32> {
+        let mut acc = 0;
+        self.nodes
+            .iter()
+            .take(self.nodes.len() - 1)
+            .map(|con| {
+                acc += con.rect.2;
+                acc
+            })
             .collect::<Vec<_>>()
     }
 }
@@ -221,7 +239,7 @@ impl std::fmt::Display for Direction {
     }
 }
 
-fn resize(conn: &mut I3Connection, mut dst: Vec<u64>) -> Result<(), anyhow::Error> {
+fn resize(conn: &mut I3Connection, dst_percentages: Vec<u64>) -> Result<(), anyhow::Error> {
     let root = conn.get_tree()?;
     let root_container = find_root_container(&root)?;
     log_tree("", root_container);
@@ -231,25 +249,40 @@ fn resize(conn: &mut I3Connection, mut dst: Vec<u64>) -> Result<(), anyhow::Erro
         ));
     }
     let n = root_container.nodes.len();
-    if dst.len() == 0 {
-        let width = 100 / n as u64;
-        dst = itertools::unfold(0, |acc| {
-            *acc += width;
-            (*acc < 100).then(|| *acc)
-        })
-        .collect::<Vec<_>>();
-    } else if dst.len() == n - 1 {
-        for i in 1..dst.len() {
-            dst[i] += dst[i - 1];
-        }
-        if *dst.last().unwrap() >= 100 {
-            return Err(anyhow!("percentages must sum to less than 100: {:?}", dst));
-        }
-    } else {
-        return Err(anyhow!("wrong number of percentages passed: {:?}", dst));
-    }
+    let total_width: i32 = root_container.widths().into_iter().sum();
 
-    let mut src = root_container.percentages_cumulative();
+    if dst_percentages.len() >= n {
+        bail!("too many percentages passed: {:?}", dst_percentages);
+    }
+    let dst = {
+        let mut sum_percent = 0;
+        let mut dst = Vec::new();
+        for (i, percent) in dst_percentages.iter().copied().enumerate() {
+            sum_percent += percent;
+            if sum_percent >= 100 {
+                bail!("percentages must sum to <= 100: {:?}", dst_percentages);
+            }
+
+            dst.push(
+                if i > 0 { dst[i - 1] } else { 0 }
+                    + (total_width as f64 * percent as f64 / 100.0) as i32,
+            );
+        }
+
+        if (n - 1) > dst_percentages.len() {
+            let delta = n - dst_percentages.len();
+            let omitted_percent = (100.0 - sum_percent as f64) / (delta as f64);
+            for i in dst_percentages.len()..(n - 1) {
+                dst.push(
+                    if i > 0 { dst[i - 1] } else { 0 }
+                        + (total_width as f64 * omitted_percent as f64 / 100.0) as i32,
+                );
+            }
+        }
+        dst
+    };
+
+    let mut src = root_container.right_x();
 
     // Proof of why it's always possible to align at least one edge per iteration
     // of the loop: the only way container[0]'s right edge cannot be aligned is
@@ -266,7 +299,7 @@ fn resize(conn: &mut I3Connection, mut dst: Vec<u64>) -> Result<(), anyhow::Erro
                 || (i < n - 2 && src[i] < dst[i] && dst[i] < src[i + 1])
             {
                 let cmd = format!(
-                    "[con_id=\"{}\"] resize grow right 1 px or {} ppt",
+                    "[con_id=\"{}\"] resize grow right {} px",
                     root_container.nodes[i].id,
                     dst[i] - src[i],
                 );
@@ -277,7 +310,7 @@ fn resize(conn: &mut I3Connection, mut dst: Vec<u64>) -> Result<(), anyhow::Erro
                 || (i > 0 && src[i - 1] < dst[i] && dst[i] < src[i])
             {
                 let cmd = format!(
-                    "[con_id=\"{}\"] resize shrink right 1 px or {} ppt",
+                    "[con_id=\"{}\"] resize shrink right {} px",
                     root_container.nodes[i].id,
                     src[i] - dst[i],
                 );
