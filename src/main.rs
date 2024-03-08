@@ -7,8 +7,8 @@ use log::{debug, info};
 
 trait NodeExt {
     fn get_focused_child(&self) -> Option<(usize, &Self)>;
-    fn percentages_cumulative(&self) -> Vec<u64>;
-    fn percentages(&self) -> Vec<u64>;
+    fn percentages_cumulative(&self) -> Vec<f64>;
+    fn percentages(&self) -> Vec<f64>;
     fn widths(&self) -> Vec<i32>;
     fn right_x(&self) -> Vec<i32>;
 }
@@ -23,23 +23,22 @@ impl NodeExt for Node {
         })
     }
 
-    fn percentages_cumulative(&self) -> Vec<u64> {
-        let mut acc = 0;
+    fn percentages_cumulative(&self) -> Vec<f64> {
+        let mut acc = 0f64;
         self.nodes
             .iter()
             .take(self.nodes.len() - 1)
             .map(|con| {
-                acc += (con.percent.expect("missing percentage value in container") * 100.0).round()
-                    as u64;
+                acc += con.percent.expect("missing percentage value in container");
                 acc
             })
             .collect::<Vec<_>>()
     }
 
-    fn percentages(&self) -> Vec<u64> {
+    fn percentages(&self) -> Vec<f64> {
         self.nodes
             .iter()
-            .map(|con| (con.percent.expect("missing percentage") * 100.0).round() as u64)
+            .map(|con| con.percent.expect("missing percentage"))
             .collect::<Vec<_>>()
     }
 
@@ -180,8 +179,11 @@ struct Rotate {
 #[derive(FromArgs, Debug)]
 #[argh(subcommand, name = "resize")]
 struct Resize {
+    /// direction of the percentages provided
+    #[argh(option, default = "Direction::Right")]
+    direction: Direction,
     #[argh(positional)]
-    percentages: Vec<u64>,
+    percentages: Vec<f64>,
 }
 
 /// Swap subcommand.
@@ -239,7 +241,11 @@ impl std::fmt::Display for Direction {
     }
 }
 
-fn resize(conn: &mut I3Connection, dst_percentages: Vec<u64>) -> Result<(), anyhow::Error> {
+fn resize(
+    conn: &mut I3Connection,
+    dir: Direction,
+    mut dst_percentages: Vec<f64>,
+) -> Result<(), anyhow::Error> {
     let root = conn.get_tree()?;
     let root_container = find_root_container(&root)?;
     log_tree("", root_container);
@@ -251,34 +257,37 @@ fn resize(conn: &mut I3Connection, dst_percentages: Vec<u64>) -> Result<(), anyh
     let n = root_container.nodes.len();
     let total_width: i32 = root_container.widths().into_iter().sum();
 
-    if dst_percentages.len() >= n {
-        bail!("too many percentages passed: {:?}", dst_percentages);
+    let sum: f64 = dst_percentages.iter().sum();
+    if sum > 1.0 {
+        bail!("percentages must sum to <= 1: {:?}", dst_percentages);
     }
+    if dst_percentages.len() > n {
+        bail!("too many percentages passed: {:?}", dst_percentages);
+    } else if dst_percentages.len() < n {
+        let omitted_count = n - dst_percentages.len();
+        let omitted = (1.0 - sum) / omitted_count as f64;
+        if omitted == 0f64 {
+            bail!("omitted percentage is 0");
+        }
+        for _ in 0..omitted_count {
+            dst_percentages.push(omitted);
+        }
+    }
+    if dir == Direction::Right {
+        dst_percentages.reverse();
+    }
+    // dst needs to have in pixels, where the right edge of each column should
+    // be (except for the rightmost column).
     let dst = {
-        let mut sum_percent = 0;
-        let mut dst = Vec::new();
-        for (i, percent) in dst_percentages.iter().copied().enumerate() {
-            sum_percent += percent;
-            if sum_percent >= 100 {
-                bail!("percentages must sum to <= 100: {:?}", dst_percentages);
-            }
-
-            dst.push(
-                if i > 0 { dst[i - 1] } else { 0 }
-                    + (total_width as f64 * percent as f64 / 100.0) as i32,
-            );
-        }
-
-        if (n - 1) > dst_percentages.len() {
-            let delta = n - dst_percentages.len();
-            let omitted_percent = (100.0 - sum_percent as f64) / (delta as f64);
-            for i in dst_percentages.len()..(n - 1) {
-                dst.push(
-                    if i > 0 { dst[i - 1] } else { 0 }
-                        + (total_width as f64 * omitted_percent as f64 / 100.0) as i32,
-                );
-            }
-        }
+        let mut acc = 0;
+        let mut dst = dst_percentages
+            .into_iter()
+            .map(|x| {
+                acc += (x * total_width as f64) as i32;
+                acc
+            })
+            .collect::<Vec<_>>();
+        dst.pop();
         dst
     };
 
@@ -343,7 +352,7 @@ fn center(conn: &mut I3Connection, dir: Option<Direction>) -> Result<(), anyhow:
             if i == root.nodes.len() - 1 {
                 anyhow::bail!("cannot center rightmost top-level container");
             }
-            (percentages_cumulative[i] + percentages_cumulative[i - 1]) / 2
+            (percentages_cumulative[i] + percentages_cumulative[i - 1]) / 2.0
         }
         Some(Direction::Left) => {
             if i == 0 {
@@ -358,30 +367,32 @@ fn center(conn: &mut I3Connection, dir: Option<Direction>) -> Result<(), anyhow:
             percentages_cumulative[i]
         }
     };
-    if con_center == 50 {
+    let center = percentages.iter().sum::<f64>() / 2.0;
+    if (con_center * 100.0).round() == (center * 100.0).round() {
         return Ok(());
-    } else if con_center > 50 {
-        let from_center = con_center - 50;
+    } else if con_center > center {
+        let from_center = con_center - center;
         percentages[0] = if percentages[0] > from_center {
             percentages[0] - from_center
         } else {
-            1
+            0.01
         };
     } else {
-        let from_center = 50 - con_center;
+        let from_center = center - con_center;
         let last = *percentages.last().unwrap();
         percentages[0] += if last > from_center {
             from_center
         } else {
-            last - 1
+            last - 0.01
         };
     }
-    let _ = percentages.pop();
+    // Pop the last percentage and let resize figure it out.
+    percentages.pop();
 
     debug!("performing resize: {:?}", percentages);
 
     // Perform the resize.
-    resize(conn, percentages)
+    resize(conn, Direction::Left, percentages)
 }
 
 fn focused_and(root: &Node, direction: Direction) -> anyhow::Result<(&Node, &Node)> {
@@ -483,7 +494,15 @@ fn main() -> Result<(), anyhow::Error> {
             let root = find_root_container(&root)?;
             log_tree("", &root);
         }
-        SubCommands::Resize(Resize { percentages }) => resize(&mut conn, percentages)?,
+        SubCommands::Resize(Resize {
+            direction,
+            mut percentages,
+        }) => {
+            for f in percentages.iter_mut() {
+                *f /= 100f64;
+            }
+            resize(&mut conn, direction, percentages)?
+        }
         SubCommands::Swap(Swap {
             direction,
             noresize,
