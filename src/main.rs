@@ -14,6 +14,7 @@ trait NodeExt {
     fn right_x(&self) -> Vec<i32>;
     fn resize_stats(&self) -> ResizeStats;
     fn left_right(&self, i: usize) -> (Vec<ResizeStats>, Vec<ResizeStats>);
+    fn desired(&self) -> f64;
 }
 
 impl NodeExt for Node {
@@ -67,15 +68,7 @@ impl NodeExt for Node {
     }
 
     fn percentages_cumulative(&self) -> Vec<f64> {
-        let mut acc = 0f64;
-        self.nodes
-            .iter()
-            .take(self.nodes.len() - 1)
-            .map(|con| {
-                acc += con.percent.expect("missing percentage value in container");
-                acc
-            })
-            .collect::<Vec<_>>()
+        cumulative_sum(self.nodes.iter().map(|node| node.percent.unwrap())).collect::<Vec<_>>()
     }
 
     fn percentages(&self) -> Vec<f64> {
@@ -100,6 +93,20 @@ impl NodeExt for Node {
             })
             .collect::<Vec<_>>()
     }
+
+    fn desired(&self) -> f64 {
+        Config::default()
+            .desired(self.kind())
+            .max(self.percent.expect("missing percent"))
+    }
+}
+
+fn cumulative_sum(iter: impl IntoIterator<Item = f64>) -> impl Iterator<Item = f64> {
+    let mut acc = 0f64;
+    iter.into_iter().map(move |v| {
+        acc += v;
+        acc
+    })
 }
 
 fn run_command(conn: &mut I3Connection, cmd: &str) -> Result<(), anyhow::Error> {
@@ -326,7 +333,7 @@ fn resize_all(
     // we need to renormalize here.
     let mut sum: f64 = dst_percentages.iter().sum();
     if sum > 1.01 {
-        bail!("percentages must sum to <= 1.01: {:?}", dst_percentages);
+        bail!("percentages must sum to <= 1.01: {sum} {:?}", dst_percentages);
     }
     if sum > 1. {
         for i in dst_percentages.iter_mut() {
@@ -582,10 +589,19 @@ fn center(
     let (i, _) = root
         .get_focused_child()
         .ok_or_else(|| anyhow!("no top-level container apparently"))?;
-    let focused_percent = root.nodes[i].percent.expect("percent missing");
+    let current = root.nodes[i].percent.expect("percent missing");
+    let desired = root.nodes[i].desired();
+    let delta = if desired > current {
+        desired - current
+    } else {
+        0f64
+    };
+    let percentages_cumulative = {
+        let mut percentages = root.percentages();
+        percentages[i] = desired;
+        cumulative_sum(percentages.into_iter()).collect::<Vec<_>>()
+    };
     // Figure out if we need to move left or right.
-    let percentages_cumulative = root.percentages_cumulative();
-    let percentages = root.percentages();
     let con_center = match dir {
         None => {
             if i == 0 {
@@ -610,25 +626,34 @@ fn center(
         }
     };
     let (mut left_windows, mut right_windows) = root.left_right(i);
-    let center = percentages.iter().sum::<f64>() / 2.0;
+    let center = root.percentages().iter().sum::<f64>() / 2.0;
     let (left, right) = if (con_center * 100.0).round() == (center * 100.0).round() {
-        return Ok(());
+        (
+            left_windows
+                .iter()
+                .map(|rs| rs.percentage)
+                .collect::<Vec<_>>(),
+            right_windows
+                .iter()
+                .map(|rs| rs.percentage)
+                .collect::<Vec<_>>(),
+        )
     } else if con_center > center {
         // Shrink left and grow right.
         let from_center = con_center - center;
-        let (left, shrunk) = shrink(left_windows.as_mut_slice(), from_center);
-        let right = grow(right_windows.as_mut_slice(), config, shrunk);
+        let (left, shrunk) = shrink(left_windows.as_mut_slice(), from_center + delta);
+        let right = grow(right_windows.as_mut_slice(), config, shrunk - delta);
         (left, right)
     } else {
         // Shrink right and grow left.
         let from_center = center - con_center;
-        let (right, shrunk) = shrink(right_windows.as_mut_slice(), from_center);
-        let left = grow(left_windows.as_mut_slice(), config, shrunk);
+        let (right, shrunk) = shrink(right_windows.as_mut_slice(), from_center + delta);
+        let left = grow(left_windows.as_mut_slice(), config, shrunk - delta);
         (left, right)
     };
     let mut percentages: Vec<_> = left
         .into_iter()
-        .chain(std::iter::once(focused_percent))
+        .chain(std::iter::once(desired))
         .chain(right.into_iter().rev())
         .collect();
     debug!("performing resize: {:?}", percentages);
