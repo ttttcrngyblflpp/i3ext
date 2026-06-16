@@ -14,7 +14,7 @@ trait NodeExt {
     fn right_x(&self) -> Vec<i32>;
     fn resize_stats(&self) -> ResizeStats;
     fn left_right(&self, i: usize) -> (Vec<ResizeStats>, Vec<ResizeStats>);
-    fn desired(&self) -> f64;
+    fn desired(&self, config: Config) -> f64;
 }
 
 impl NodeExt for Node {
@@ -94,8 +94,8 @@ impl NodeExt for Node {
             .collect::<Vec<_>>()
     }
 
-    fn desired(&self) -> f64 {
-        Config::default()
+    fn desired(&self, config: Config) -> f64 {
+        config
             .desired(self.kind())
             .max(self.percent.expect("missing percent"))
     }
@@ -205,6 +205,12 @@ struct Args {
     /// log level (defaults to WARN)
     #[argh(option, short = 'l', default = "log::LevelFilter::Warn")]
     log_level: log::LevelFilter,
+    /// desired terminal percentage (defaults to 16)
+    #[argh(option, default = "16.0")]
+    terminal: f64,
+    /// desired browser percentage (defaults to 25)
+    #[argh(option, default = "25.0")]
+    browser: f64,
     #[argh(subcommand)]
     subcommands: SubCommands,
 }
@@ -333,7 +339,10 @@ fn resize_all(
     // we need to renormalize here.
     let mut sum: f64 = dst_percentages.iter().sum();
     if sum > 1.01 {
-        bail!("percentages must sum to <= 1.01: {sum} {:?}", dst_percentages);
+        bail!(
+            "percentages must sum to <= 1.01: {sum} {:?}",
+            dst_percentages
+        );
     }
     if sum > 1. {
         for i in dst_percentages.iter_mut() {
@@ -590,7 +599,7 @@ fn center(
         .get_focused_child()
         .ok_or_else(|| anyhow!("no top-level container apparently"))?;
     let current = root.nodes[i].percent.expect("percent missing");
-    let desired = root.nodes[i].desired();
+    let desired = root.nodes[i].desired(config);
     let delta = if desired > current {
         desired - current
     } else {
@@ -776,13 +785,18 @@ impl Config {
 fn main() -> Result<(), anyhow::Error> {
     let Args {
         log_level,
+        terminal,
+        browser,
         subcommands,
     } = argh::from_env();
     let () = simple_logger::SimpleLogger::new()
         .with_level(log_level)
         .init()
         .context("failed to initialize simple logger")?;
-    let config = Config::default();
+    let config = Config {
+        terminal: terminal / 100.0,
+        browser: browser / 100.0,
+    };
     let mut conn = I3Connection::connect()?;
     let () = match subcommands {
         SubCommands::LogTree(LogTree {}) => {
