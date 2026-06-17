@@ -37,14 +37,14 @@ impl NodeExt for Node {
             }
             return WindowKind::Browser;
         }
-        if self
+        for node in self
             .nodes
-            .iter()
-            .all(|node| node.kind() == WindowKind::Terminal)
-        {
-            return WindowKind::Terminal;
+            .iter() {
+            if node.kind() == WindowKind::Browser {
+                return WindowKind::Browser;
+            }
         }
-        return WindowKind::Browser;
+        return WindowKind::Terminal;
     }
 
     fn resize_stats(&self) -> ResizeStats {
